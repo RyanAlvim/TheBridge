@@ -1,0 +1,1150 @@
+package TheBridge;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+
+import org.bukkit.Bukkit;
+import org.bukkit.Color;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.Sound;
+import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.Arrow;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityShootBowEvent;
+import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.player.PlayerItemDamageEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scheduler.BukkitTask;
+
+public class BridgeGame implements Listener {
+
+    private static final Set<UUID> players = new HashSet<UUID>();
+    private static final Map<UUID, Location> preGameSpawn = new HashMap<UUID, Location>(); 
+
+    public static Player redPlayer;
+    public static Player bluePlayer;
+    public static boolean gameStarted = false;
+    private static boolean countdownActive = false;
+    private static boolean cagesActive = false;
+    private static boolean isScoring = false; 
+    public static int kills_red;
+    public static int kills_blue;
+
+    public static int redPoints = 0;
+    public static int bluePoints = 0;
+
+    // --- VARIÁVEIS DA CONTAGEM REGRESSIVA ---
+    public static int partidaSegundos = 60; // 1 Minuto
+    public static String partidaTempoFormatado = "01:00";
+    private static BukkitTask timerTask = null;
+    // ----------------------------------------
+
+    private static final Map<Location, BlockState> blocksBroken = new HashMap<Location, BlockState>();
+    private static final Set<Location> blocksPlaced = new HashSet<Location>();
+    private static final Map<UUID, UUID> lastDamageBy = new HashMap<UUID, UUID>();
+
+    public static void addPlayer(UUID uuid) {
+        players.add(uuid);
+        
+        Player p = Bukkit.getPlayer(uuid);
+        if (p != null) {
+            preGameSpawn.put(uuid, p.getLocation());
+        }
+        
+        if (canStart() && !gameStarted && !countdownActive) {
+            countdownActive = true;
+            Bukkit.getScheduler().runTaskLater(getPlugin(), new Runnable() {
+                @Override
+                public void run() {
+                    if (canStart() && !gameStarted) {
+                        startGameDelayed();
+                    } else {
+                        countdownActive = false;
+                    }
+                }
+            }, 100L);
+        }
+    }
+
+    public static void removePlayer(UUID uuid) {
+        players.remove(uuid);
+        lastDamageBy.remove(uuid);
+        preGameSpawn.remove(uuid); 
+
+        if (redPlayer != null && redPlayer.getUniqueId().equals(uuid)) {
+            redPlayer = null;
+        }
+
+        if (bluePlayer != null && bluePlayer.getUniqueId().equals(uuid)) {
+            bluePlayer = null;
+        }
+
+        if (gameStarted) {
+            checkVictory();
+        }
+    }
+
+    public static int getPlayers() {
+        return players.size();
+    }
+
+    public static boolean canStart() {
+        return players.size() >= 2;
+    }
+
+    public static Player getRedPlayer() {
+        return redPlayer;
+    }
+
+    public static Player getBluePlayer() {
+        return bluePlayer;
+    }
+
+    public static Location getRedSpawn() {
+        World world = Bukkit.getWorld("nethermap");
+        return new Location(world, 1567.5, 76.0, 1261.5, -90F, 0F);
+    }
+
+    public static Location getBlueSpawn() {
+        World world = Bukkit.getWorld("nethermap");
+        return new Location(world, 1649.5, 76.0, 1261.5, 90F, 0F);
+    }
+
+    private static Plugin getPlugin() {
+        return Bukkit.getPluginManager().getPlugins()[0];
+    }
+
+    public static void startGameDelayed() {
+        for (int i = 5; i > 0; i--) {
+            final int seconds = i;
+            Bukkit.getScheduler().runTaskLater(getPlugin(), new Runnable() {
+                @Override
+                public void run() {
+                    if (players.size() < 2) {
+                        countdownActive = false;
+                        return;
+                    }
+                    Bukkit.broadcastMessage("§eA partida começará em §b" + seconds + " §esegundos...");
+                    for (UUID uuid : players) {
+                        Player p = Bukkit.getPlayer(uuid);
+                        if (p != null) p.playSound(p.getLocation(), Sound.NOTE_STICKS, 1.0F, 1.0F);
+                    }
+                }
+            }, (5 - i) * 20L);
+        }
+
+        Bukkit.getScheduler().runTaskLater(getPlugin(), new Runnable() {
+            @Override
+            public void run() {
+                if (players.size() < 2) {
+                    countdownActive = false;
+                    return;
+                }
+                countdownActive = false;
+                startGame();
+            }
+        }, 100L);
+    }
+
+    public static void startGame() {
+        Iterator<UUID> iterator = players.iterator();
+        Player first = Bukkit.getPlayer(iterator.next());
+        Player second = Bukkit.getPlayer(iterator.next());
+
+        if (first == null || second == null) {
+            Bukkit.broadcastMessage("§cUm dos jogadores está offline.");
+            return;
+        }
+
+        redPlayer = first;
+        bluePlayer = second;
+        gameStarted = true;
+        isScoring = false; 
+        cagesActive = false; 
+        preGameSpawn.clear(); 
+
+        redPoints = 0;
+        bluePoints = 0;
+        kills_red = 0;
+        kills_blue = 0;
+
+        blocksBroken.clear();
+        blocksPlaced.clear();
+        lastDamageBy.clear();
+
+        World world = Bukkit.getWorld("nethermap");
+        if (world == null) {
+            Bukkit.broadcastMessage("§cO mundo nethermap não foi encontrado.");
+            return;
+        }
+
+        Bukkit.broadcastMessage("");
+        Bukkit.broadcastMessage("§b§lTHE BRIDGE");
+        Bukkit.broadcastMessage("§c" + redPlayer.getName() + " §7vs §9" + bluePlayer.getName());
+        Bukkit.broadcastMessage("§aA partida começou!");
+        Bukkit.broadcastMessage("");
+
+        Bukkit.getPluginManager().registerEvents(new BridgeGame(), getPlugin());
+
+        refreshPlayerState(redPlayer, true);
+        refreshPlayerState(bluePlayer, false);
+
+        redPlayer.teleport(getRedSpawn());
+        bluePlayer.teleport(getBlueSpawn());
+
+        redPlayer.sendMessage("§a§lVALENDO!");
+        bluePlayer.sendMessage("§a§lVALENDO!");
+        
+        redPlayer.playSound(redPlayer.getLocation(), Sound.ENDERDRAGON_GROWL, 1.0F, 1.5F);
+        bluePlayer.playSound(bluePlayer.getLocation(), Sound.ENDERDRAGON_GROWL, 1.0F, 1.5F);
+
+        startTimer();
+    }
+
+    private static void startTimer() {
+        partidaSegundos = 60;
+        partidaTempoFormatado = "01:00";
+        
+        if (timerTask != null) {
+            timerTask.cancel();
+        }
+
+        timerTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (!gameStarted) {
+                    cancel();
+                    return;
+                }
+                
+                partidaSegundos--;
+                
+                int minutos = partidaSegundos / 60;
+                int segundosRestantes = partidaSegundos % 60;
+                partidaTempoFormatado = String.format("%02d:%02d", minutos, segundosRestantes);
+
+                if (partidaSegundos <= 0) {
+                    cancel();
+                    determinarVencedorPorTempo();
+                }
+            }
+        }.runTaskTimer(getPlugin(), 20L, 20L);
+    }
+
+    private static void determinarVencedorPorTempo() {
+        if (!gameStarted) return;
+
+        Bukkit.broadcastMessage("\n§c§lO TEMPO ACABOU!");
+
+        if (redPoints > bluePoints) {
+            Bukkit.broadcastMessage("§c§l" + redPlayer.getName() + " §avenceu por maior pontuação! §7(" + redPoints + " vs " + bluePoints + ")\n");
+        } else if (bluePoints > redPoints) {
+            Bukkit.broadcastMessage("§9§l" + bluePlayer.getName() + " §avenceu por maior pontuação! §7(" + bluePoints + " vs " + redPoints + ")\n");
+        } else {
+            if (kills_red > kills_blue) {
+                Bukkit.broadcastMessage("§c§l" + redPlayer.getName() + " §avenceu no desempate por Kills! §7(" + kills_red + " vs " + kills_blue + ")\n");
+            } else if (kills_blue > kills_red) {
+                Bukkit.broadcastMessage("§9§l" + bluePlayer.getName() + " §avenceu no desempate por Kills! §7(" + kills_blue + " vs " + kills_red + ")\n");
+            } else {
+                Bukkit.broadcastMessage("§e§lEMPATE! §aNinguém marcou mais pontos ou obteve mais kills.\n");
+            }
+        }
+
+        resetGame();
+    }
+
+    private static void setupRound() {
+        cagesActive = true;
+        isScoring = false; 
+        lastDamageBy.clear(); 
+        
+        refreshPlayerState(redPlayer, true);
+        refreshPlayerState(bluePlayer, false);
+
+        redPlayer.teleport(getRedSpawn());
+        bluePlayer.teleport(getBlueSpawn());
+
+        buildCage(getRedSpawn(), (short) 14);
+        buildCage(getBlueSpawn(), (short) 11);
+
+        redPlayer.sendMessage("§cVocê está preso na cabine! Preparar...");
+        bluePlayer.sendMessage("§9Você está preso na cabine! Preparar...");
+
+        Bukkit.getScheduler().runTaskLater(getPlugin(), new Runnable() {
+            @Override
+            public void run() {
+                if (!gameStarted) return;
+                
+                removeCage(getRedSpawn());
+                removeCage(getBlueSpawn());
+                cagesActive = false;
+
+                redPlayer.sendMessage("§a§lVALENDO!");
+                bluePlayer.sendMessage("§a§lVALENDO!");
+                
+                redPlayer.playSound(redPlayer.getLocation(), Sound.ENDERDRAGON_GROWL, 1.0F, 1.5F);
+                bluePlayer.playSound(bluePlayer.getLocation(), Sound.ENDERDRAGON_GROWL, 1.0F, 1.5F);
+            }
+        }, 100L);
+    }
+
+    private static void refreshPlayerState(Player p, boolean isRed) {
+        if (p == null || !p.isOnline()) return;
+        p.setHealth(p.getMaxHealth());
+        p.setFoodLevel(20);
+        p.setFireTicks(0);
+        p.setFallDistance(0F);
+        p.setLevel(0); 
+        p.setExp(0.0F); 
+        if (isRed) giveRedKit(p); else giveBlueKit(p);
+        p.updateInventory();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void buildCage(Location spawn, short woolData) {
+        World world = spawn.getWorld();
+        int sx = spawn.getBlockX();
+        int sy = spawn.getBlockY();
+        int sz = spawn.getBlockZ();
+
+        for (int y = sy - 1; y <= sy + 3; y++) {
+            for (int x = sx - 1; x <= sx + 1; x++) {
+                for (int z = sz - 1; z <= sz + 1; z++) {
+                    boolean isWall = (x == sx - 1 || x == sx + 1 || z == sz - 1 || z == sz + 1);
+                    
+                    if (y == sy - 1) {
+                        Block b = world.getBlockAt(x, y, z);
+                        b.setType(Material.WOOL);
+                        b.setData((byte) woolData);
+                    } 
+                    else if (y == sy + 3) {
+                        world.getBlockAt(x, y, z).setType(Material.BARRIER);
+                    } 
+                    else if (isWall) {
+                        world.getBlockAt(x, y, z).setType(Material.BARRIER);
+                    } 
+                    else {
+                        world.getBlockAt(x, y, z).setType(Material.AIR);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void removeCage(Location spawn) {
+        World world = spawn.getWorld();
+        int sx = spawn.getBlockX();
+        int sy = spawn.getBlockY();
+        int sz = spawn.getBlockZ();
+
+        for (int y = sy - 1; y <= sy + 3; y++) {
+            for (int x = sx - 1; x <= sx + 1; x++) {
+                for (int z = sz - 1; z <= sz + 1; z++) {
+                    world.getBlockAt(x, y, z).setType(Material.AIR);
+                }
+            }
+        }
+    }
+
+    public static void giveRedKit(Player p) {
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(null);
+
+        p.getInventory().setItem(0, new ItemStack(Material.IRON_SWORD));
+        
+        ItemStack pickaxe = new ItemStack(Material.DIAMOND_PICKAXE);
+        pickaxe.addEnchantment(Enchantment.DIG_SPEED, 1);
+        p.getInventory().setItem(1, pickaxe);
+
+        p.getInventory().setItem(2, new ItemStack(Material.STAINED_CLAY, 64, (short) 14));
+        p.getInventory().setItem(3, new ItemStack(Material.STAINED_CLAY, 64, (short) 14));
+        p.getInventory().setItem(4, new ItemStack(Material.BOW));
+        p.getInventory().setItem(5, new ItemStack(Material.ARROW, 1));
+        p.getInventory().setItem(6, new ItemStack(Material.GOLDEN_APPLE, 8));
+
+        equipArmor(p, Color.RED);
+    }
+
+    public static void giveBlueKit(Player p) {
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(null);
+
+        p.getInventory().setItem(0, new ItemStack(Material.IRON_SWORD));
+        
+        ItemStack pickaxe = new ItemStack(Material.DIAMOND_PICKAXE);
+        pickaxe.addEnchantment(Enchantment.DIG_SPEED, 1);
+        p.getInventory().setItem(1, pickaxe);
+
+        p.getInventory().setItem(2, new ItemStack(Material.STAINED_CLAY, 64, (short) 11));
+        p.getInventory().setItem(3, new ItemStack(Material.STAINED_CLAY, 64, (short) 11));
+        p.getInventory().setItem(4, new ItemStack(Material.BOW));
+        p.getInventory().setItem(5, new ItemStack(Material.ARROW, 1));
+        p.getInventory().setItem(6, new ItemStack(Material.GOLDEN_APPLE, 8));
+
+        equipArmor(p, Color.BLUE);
+    }
+
+    private static void equipArmor(Player player, Color color) {
+        ItemStack helmet = new ItemStack(Material.LEATHER_HELMET);
+        ItemStack chestplate = new ItemStack(Material.LEATHER_CHESTPLATE);
+        ItemStack leggings = new ItemStack(Material.LEATHER_LEGGINGS);
+        ItemStack boots = new ItemStack(Material.LEATHER_BOOTS);
+
+        LeatherArmorMeta helmetMeta = (LeatherArmorMeta) helmet.getItemMeta();
+        helmetMeta.setColor(color);
+        helmet.setItemMeta(helmetMeta);
+
+        LeatherArmorMeta chestMeta = (LeatherArmorMeta) chestplate.getItemMeta();
+        chestMeta.setColor(color);
+        chestplate.setItemMeta(chestMeta);
+
+        LeatherArmorMeta leggingsMeta = (LeatherArmorMeta) leggings.getItemMeta();
+        leggingsMeta.setColor(color);
+        leggings.setItemMeta(leggingsMeta);
+
+        LeatherArmorMeta bootsMeta = (LeatherArmorMeta) boots.getItemMeta();
+        bootsMeta.setColor(color);
+        boots.setItemMeta(bootsMeta);
+
+        player.getInventory().setHelmet(helmet);
+        player.getInventory().setChestplate(chestplate);
+        player.getInventory().setLeggings(leggings);
+        player.getInventory().setBoots(boots);
+    }
+
+    public static void checkVictory() {
+        if (!gameStarted) return;
+
+        if (players.size() <= 1) {
+            Player winner = null;
+            if (players.size() == 1) {
+                UUID winnerUUID = players.iterator().next();
+                winner = Bukkit.getPlayer(winnerUUID);
+            }
+
+            if (winner != null) {
+                Bukkit.broadcastMessage("§a§l" + winner.getName() + " venceu a partida de The Bridge!");
+            } else {
+                Bukkit.broadcastMessage("§cA partida terminou sem vencedores.");
+            }
+
+            resetGame();
+            return;
+        }
+
+        if (redPoints >= 5) {
+            Bukkit.broadcastMessage("\n§c§l" + redPlayer.getName() + " §avenceu a partida marcando 5 pontos!\n");
+            resetGame();
+        } else if (bluePoints >= 5) {
+            Bukkit.broadcastMessage("\n§9§l" + bluePlayer.getName() + " §avenceu a partida marcando 5 pontos!\n");
+            resetGame();
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    public static void resetGame() {
+        gameStarted = false;
+        countdownActive = false;
+        cagesActive = false;
+        isScoring = false; 
+        players.clear();
+        preGameSpawn.clear(); 
+        redPlayer = null;
+        bluePlayer = null;
+        redPoints = 0;
+        bluePoints = 0;
+        kills_blue = 0;
+        kills_red = 0;
+        lastDamageBy.clear();
+
+        if (timerTask != null) {
+            timerTask.cancel();
+            timerTask = null;
+        }
+        partidaSegundos = 60;
+        partidaTempoFormatado = "01:00";
+        
+        for (Location loc : blocksPlaced) {
+            loc.getBlock().setType(Material.AIR);
+        }
+        
+        for (Map.Entry<Location, BlockState> entry : blocksBroken.entrySet()) {
+            entry.getValue().update(true, false);
+        }
+
+        blocksPlaced.clear();
+        blocksBroken.clear();
+        
+        Bukkit.broadcastMessage("§eA partida foi resetada e o mapa foi completamente restaurado!");
+    }
+
+    private static void handlePlayerDeath(Player victim, String causeType) {
+        UUID victimId = victim.getUniqueId();
+        boolean isVictimRed = victim.equals(redPlayer);
+        
+        String victimName = (isVictimRed ? "§c" : "§9") + victim.getName();
+        String killerName = null;
+        Player killer = null;
+
+        if (lastDamageBy.containsKey(victimId)) {
+            killer = Bukkit.getPlayer(lastDamageBy.get(victimId));
+            if (killer != null && killer.isOnline()) {
+                killerName = (killer.equals(redPlayer) ? "§c" : "§9") + killer.getName();
+            }
+        }
+
+        if (killer != null) {
+            if (isVictimRed) {
+                kills_blue += 1;
+            } else {
+                kills_red += 1;
+            }
+        }
+
+        if (causeType.equals("VOID")) {
+            if (killerName != null) {
+                Bukkit.broadcastMessage(victimName + " §efoi jogado no void por " + killerName + "§7.");
+            } else {
+                Bukkit.broadcastMessage(victimName + " §emorreu para o void.");
+            }
+        } else {
+            if (killerName != null) {
+                Bukkit.broadcastMessage(victimName + " §emorreu para " + killerName + "§7.");
+            } else {
+                Bukkit.broadcastMessage(victimName + " §emorreu sozinho.");
+            }
+        }
+
+        for (UUID id : players) {
+            Player gamePlayer = Bukkit.getPlayer(id);
+            if (gamePlayer != null) {
+                gamePlayer.playSound(gamePlayer.getLocation(), Sound.ANVIL_LAND, 1.0F, 1.2F);
+            }
+        }
+
+        refreshPlayerState(victim, isVictimRed);
+        victim.teleport(isVictimRed ? getRedSpawn() : getBlueSpawn());
+        lastDamageBy.remove(victimId);
+    }
+
+    private static void playScoreSound() {
+        for (UUID id : players) {
+            Player gamePlayer = Bukkit.getPlayer(id);
+            if (gamePlayer != null) {
+                gamePlayer.playSound(gamePlayer.getLocation(), Sound.LEVEL_UP, 1.0F, 0.8F);
+            }
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    @EventHandler
+    public void onBlockBreak(BlockBreakEvent e) {
+        Player p = e.getPlayer();
+        Block block = e.getBlock();
+        
+        if (p.getWorld().getName().equals("nethermap")) {
+            Material blockType = block.getType();
+            byte blockData = block.getData();
+            
+            if (blockType == Material.STAINED_CLAY) {
+                if (blockData == 0 || blockData == 11 || blockData == 14) {
+                    if (p.getItemInHand().getType() == Material.DIAMOND_PICKAXE) {
+                        
+                        // Zera a durabilidade da picareta instantaneamente para remover a barra
+                        p.getItemInHand().setDurability((short) 0);
+                        
+                        if (!blocksPlaced.contains(block.getLocation())) {
+                            if (!blocksBroken.containsKey(block.getLocation())) {
+                                blocksBroken.put(block.getLocation(), block.getState());
+                            }
+                        }
+                        
+                        e.setCancelled(false);
+                        return;
+                    }
+                }
+            }
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onBlockPlace(BlockPlaceEvent e) {
+        Player p = e.getPlayer();
+        Block block = e.getBlock();
+        
+        if (p.getWorld().getName().equals("nethermap") && gameStarted && players.contains(p.getUniqueId())) {
+            int blockY = block.getY();
+            int blockZ = block.getZ();
+
+            if (blockY > 73) {
+                p.sendMessage("§cVocê não pode colocar blocos acima da altura permitida!");
+                p.playSound(p.getLocation(), Sound.DIG_WOOD, 1.0F, 0.5F);
+                e.setCancelled(true);
+                return;
+            }
+
+            if (blockZ < 1248 || blockZ > 1276) {
+                p.sendMessage("§cVocê não pode colocar blocks fora do limite da ponte!");
+                p.playSound(p.getLocation(), Sound.DIG_WOOD, 1.0F, 0.5F);
+                e.setCancelled(true);
+                return;     
+            }
+
+            blocksPlaced.add(block.getLocation());
+            e.setCancelled(false);
+        }
+    }
+
+    @EventHandler
+    public void onConsume(PlayerItemConsumeEvent e) {
+        if (e.getItem().getType() == Material.GOLDEN_APPLE) {
+            Player p = e.getPlayer();
+            p.setHealth(p.getMaxHealth());
+        }
+    }
+
+    @EventHandler
+    public void onItemDamage(PlayerItemDamageEvent e) {
+        e.setDamage(0);
+        e.setCancelled(true);
+    }
+
+    @EventHandler
+    public void onBowShoot(EntityShootBowEvent e) {
+        if (e.getEntity() instanceof Player && e.getProjectile() instanceof Arrow) {
+            final Player p = (Player) e.getEntity();
+            if (gameStarted && players.contains(p.getUniqueId())) {
+                
+                // Zera a durabilidade do arco disparado para sumir com a barra
+                if (p.getItemInHand().getType() == Material.BOW) {
+                    p.getItemInHand().setDurability((short) 0);
+                }
+                
+                new BukkitRunnable() {
+                    int ticksLeft = 60;
+
+                    @Override
+                    public void run() {
+                        if (!gameStarted || !p.isOnline() || !players.contains(p.getUniqueId())) {
+                            cancel();
+                            return;
+                        }
+
+                        ticksLeft -= 2; 
+
+                        if (ticksLeft <= 0) {
+                            p.setLevel(0);
+                            p.setExp(0.0F);
+                            p.getInventory().setItem(5, new ItemStack(Material.ARROW, 1));
+                            p.playSound(p.getLocation(), Sound.CHICKEN_EGG_POP, 0.8F, 1.2F);
+                            cancel();
+                        } else {
+                            p.setLevel((int) Math.ceil(ticksLeft / 20.0));
+                            float progress = (float) ticksLeft / 60.0F;
+                            p.setExp(progress);
+                        }
+                    }
+                }.runTaskTimer(getPlugin(), 0L, 2L);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onProjectileHit(ProjectileHitEvent e) {
+        if (e.getEntity() instanceof Arrow) {
+            Arrow arrow = (Arrow) e.getEntity();
+            if (gameStarted && arrow.getShooter() instanceof Player) {
+                arrow.remove();
+            }
+        }
+    }
+
+    @EventHandler
+    public void onEntityDamageByEntity(EntityDamageByEntityEvent e) {
+        if (!(e.getEntity() instanceof Player)) return;
+        Player victim = (Player) e.getEntity();
+        
+        if (!gameStarted || cagesActive || !players.contains(victim.getUniqueId())) return;
+
+        Player attacker = null;
+
+        if (e.getDamager() instanceof Player) {
+            attacker = (Player) e.getDamager();
+        } 
+        else if (e.getDamager() instanceof Arrow) {
+            Arrow arrow = (Arrow) e.getDamager();
+            if (arrow.getShooter() instanceof Player) {
+                attacker = (Player) arrow.getShooter();
+                
+                if (!attacker.equals(victim)) {
+                    attacker.playSound(attacker.getLocation(), Sound.SUCCESSFUL_HIT, 1.0F, 1.0F);
+                }
+            }
+        }
+
+        if (attacker != null && !attacker.equals(victim)) {
+            lastDamageBy.put(victim.getUniqueId(), attacker.getUniqueId());
+            
+            // Zera a durabilidade do item na mão de quem bateu (Espada / Arco)
+            if (attacker.getItemInHand() != null) {
+                attacker.getItemInHand().setDurability((short) 0);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onEntityDamage(EntityDamageEvent e) {
+        if (!(e.getEntity() instanceof Player)) return;
+        
+        Player p = (Player) e.getEntity();
+        
+        if (gameStarted && (p.equals(redPlayer) || p.equals(bluePlayer))) {
+            if (cagesActive) {
+                e.setCancelled(true);
+                return;
+            }
+
+            if (e.getFinalDamage() >= p.getHealth()) {
+                e.setCancelled(true);
+                handlePlayerDeath(p, "COMBAT");
+            }
+        }
+    }
+
+    @EventHandler
+    public void onPlayerMove(PlayerMoveEvent e) {
+        Player p = e.getPlayer();
+        UUID uuid = p.getUniqueId();
+        
+        if (!p.getWorld().getName().equals("nethermap")) return;
+        
+        if (!gameStarted) {
+            if (players.contains(uuid) && p.getLocation().getY() <= 56.0) {
+                Location respawnLoc = preGameSpawn.get(uuid);
+                if (respawnLoc != null) {
+                    p.teleport(respawnLoc);
+                } else {
+                    p.teleport(getRedSpawn()); 
+                }
+                p.sendMessage("§eVocê caiu no void antes do jogo começar! Retornando ao ponto inicial.");
+                p.playSound(p.getLocation(), Sound.CHICKEN_EGG_POP, 1.0F, 1.0F);
+            }
+            return; 
+        }
+
+        boolean isRed = p.equals(redPlayer);
+        boolean isBlue = p.equals(bluePlayer);
+        
+        if (!isRed && !isBlue) return;
+
+        if (cagesActive) {
+            Location from = e.getFrom();
+            Location to = e.getTo();
+            if (from.getBlockX() != to.getBlockX() || from.getBlockZ() != to.getBlockZ()) {
+                from.setPitch(to.getPitch());
+                from.setYaw(to.getYaw());
+                p.teleport(from);
+                return;
+            }
+        }
+
+        Location loc = p.getLocation();
+        double x = loc.getX();
+        double y = loc.getY();
+        double z = loc.getZ();
+
+        if (isRed && (y >= 61.5 && y <= 63.0)) {
+            if ((x >= 1651.0 && x <= 1654.0) && (z >= 1260.0 && z <= 1263.0)) {
+                if (isScoring) return; 
+                isScoring = true;
+                
+                redPoints++;
+                Bukkit.broadcastMessage("§c§lPONTO! §c" + redPlayer.getName() + "§e(§c"+(int)redPlayer.getHealth()+"❤§e) marcou um ponto! §7(§c" + redPoints + " §7- §9" + bluePoints + "§7)");
+                playScoreSound();
+                
+                if (redPoints >= 5) {
+                    checkVictory();
+                } else {
+                    setupRound();
+                }
+                return;
+            }
+        }
+
+        if (isBlue && (y >= 61.5 && y <= 63.0)) {
+            if ((x >= 1563.0 && x <= 1567.0) && (z >= 1260.0 && z <= 1263.0)) {
+                if (isScoring) return; 
+                isScoring = true;
+                
+                bluePoints++;
+                Bukkit.broadcastMessage("§9§lPONTO! §9" + bluePlayer.getName() + "§e(§c"+(int)bluePlayer.getHealth()+"❤§e) marcou um ponto! §7(§c" + redPoints + " §7- §9" + bluePoints + "§7)");
+                playScoreSound();
+                
+                if (bluePoints >= 5) {
+                    checkVictory();
+                } else {
+                    setupRound();
+                }
+                return;
+            }
+        }
+
+        if (y <= 56.0) {
+            handlePlayerDeath(p, "VOID");
+        }
+    }
+
+    @EventHandler
+    public void onQuit(PlayerQuitEvent e) {
+        removePlayer(e.getPlayer().getUniqueId());
+    }
+}
+
+
+package TheBridge;
+
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.entity.Player;
+
+public class BridgeDeathListener implements Listener {
+
+    @EventHandler
+    public void onDeath(PlayerDeathEvent e) {
+
+        Player p = e.getEntity();
+
+        if (!p.getWorld().getName().equalsIgnoreCase("nethermap")) {
+            return;
+        }
+
+        e.getDrops().clear();
+        e.setDroppedExp(0);
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent e) {
+
+        Player p = e.getPlayer();
+
+        if (BridgeGame.getRedPlayer() != null
+                && p.getUniqueId().equals(
+                        BridgeGame.getRedPlayer().getUniqueId())) {
+
+            e.setRespawnLocation(
+                    BridgeGame.getRedSpawn()
+            );
+        }
+
+        else if (BridgeGame.getBluePlayer() != null
+                && p.getUniqueId().equals(
+                        BridgeGame.getBluePlayer().getUniqueId())) {
+
+            e.setRespawnLocation(
+                    BridgeGame.getBlueSpawn()
+            );
+        }
+
+        p.getServer().getScheduler().runTaskLater(
+                p.getServer().getPluginManager().getPlugins()[0],
+                new Runnable() {
+
+                    @Override
+                    public void run() {
+
+                        if (BridgeGame.getRedPlayer() != null
+                                && p.getUniqueId().equals(
+                                        BridgeGame.getRedPlayer().getUniqueId())) {
+
+                            BridgeGame.giveRedKit(p);
+                        }
+
+                        else if (BridgeGame.getBluePlayer() != null
+                                && p.getUniqueId().equals(
+                                        BridgeGame.getBluePlayer().getUniqueId())) {
+
+                            BridgeGame.giveBlueKit(p);
+                        }
+
+                        p.updateInventory();
+                    }
+
+                },
+                2L
+        );
+    }
+}
+
+
+
+package Scoreboard;
+
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scoreboard.DisplaySlot;
+import org.bukkit.scoreboard.Objective;
+import org.bukkit.scoreboard.Scoreboard;
+
+import Comandos.Tag;
+import Main.Main;
+import TheBridge.BridgeGame;
+
+public class ScoreboardAPI {
+
+    private static final String[] TITLES = {
+            "§b§lG",
+            "§b§lGA",
+            "§b§lGAR",
+            "§b§lGARK",
+            "§b§lGARKE",
+            "§b§lGARKEY",
+            "§b§lGARKEY §e§lN",
+            "§b§lGARKEY §e§lNE",
+            "§b§lGARKEY §e§lNET",
+            "§b§lGARKEY §e§lNETW",
+            "§b§lGARKEY §e§lNETWO",
+            "§b§lGARKEY §e§lNETWOR",
+            "§b§lGARKEY §e§lNETWORK"
+    };
+
+    private static final String[] BRIDGE_TITLES = {
+            "§b§lBAPPEP MC",
+            "§f§lBAPPEP MC",
+            "§3§lBAPPEP MC",
+            "§f§lBAPPEP MC"
+    };
+
+    private static int animation = 0;
+    private static int bridgeAnimation = 0;
+
+    public static void start() {
+
+        new BukkitRunnable() {
+
+            @Override
+            public void run() {
+
+                animation++;
+
+                if (animation >= TITLES.length) {
+                    animation = 0;
+                }
+
+                bridgeAnimation++;
+
+                if (bridgeAnimation >= BRIDGE_TITLES.length) {
+                    bridgeAnimation = 0;
+                }
+
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    update(player);
+                }
+            }
+
+        }.runTaskTimer(Main.getInstance(), 0L, 5L);
+    }
+
+    public static void update(Player player) {
+
+        if (player.getWorld().getName().equalsIgnoreCase("nethermap") && BridgeGame.gameStarted == false) {
+        	updateBridgeBoardPreGame(player);
+        	//updateBridgeBoard(player);
+        } else if(player.getWorld().getName().equalsIgnoreCase("nethermap") && BridgeGame.gameStarted == true) {
+        	updateBridgeBoard(player);
+        }
+        
+        else {
+            updateLobbyBoard(player);
+        }
+    }
+
+    private static void updateLobbyBoard(Player player) {
+
+        Scoreboard scoreboard = player.getScoreboard();
+
+        Objective objective = scoreboard.getObjective("sidebar");
+
+        if (objective == null) {
+            objective = scoreboard.registerNewObjective("sidebar", "dummy");
+            objective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        }
+
+        objective.setDisplayName(TITLES[animation]);
+
+        for (String entry : scoreboard.getEntries()) {
+            scoreboard.resetScores(entry);
+        }
+
+        objective.getScore("§1").setScore(10);
+
+        objective.getScore("§7Rank: " + Tag.getPrefix(player)).setScore(9);
+
+        objective.getScore("§2").setScore(8);
+
+        objective.getScore("§7Winstreak: §a0").setScore(7);
+
+        objective.getScore("§7Vitórias: §a0").setScore(6);
+
+        objective.getScore("§7Derrotas: §c0").setScore(5);
+
+        objective.getScore("§7Online: §a" + Bukkit.getOnlinePlayers().size()).setScore(4);
+
+        objective.getScore("§3").setScore(3);
+
+        objective.getScore("§ewww.garkey.com").setScore(0);
+
+        player.setScoreboard(scoreboard);
+    }
+
+    private static void updateBridgeBoard(Player player) {
+
+        Scoreboard scoreboard = player.getScoreboard();
+
+        Objective objective = scoreboard.getObjective("sidebar");
+
+        if (objective == null) {
+            objective = scoreboard.registerNewObjective("sidebar", "dummy");
+            objective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        }
+
+        objective.setDisplayName(
+                BRIDGE_TITLES[bridgeAnimation]
+        );
+
+        for (String entry : scoreboard.getEntries()) {
+            scoreboard.resetScores(entry);
+        }
+
+        objective.getScore("§1").setScore(10);
+
+        objective.getScore("§fTempo restante: §b"+BridgeGame.partidaTempoFormatado ).setScore(9);
+        objective.getScore("§f ").setScore(8);
+        objective.getScore("§1 ").setScore(8);
+
+        if(BridgeGame.redPoints == 0) {
+        	objective.getScore("§c➜⬜⬜⬜⬜⬜").setScore(6);
+        }else if(BridgeGame.redPoints == 1) {
+        	objective.getScore("§c➜⬛⬜⬜⬜⬜").setScore(6);
+
+        }else if(BridgeGame.redPoints == 2) {
+        	objective.getScore("§c➜⬛⬛⬜⬜⬜").setScore(6);
+
+        }
+        else if(BridgeGame.redPoints == 3) {
+        	objective.getScore("§c➜⬛⬛⬛⬜⬜").setScore(6);
+
+        }
+        else if(BridgeGame.redPoints == 4) {
+        	objective.getScore("§c➜⬛⬛⬛⬛⬜").setScore(6);
+
+        }
+        else if(BridgeGame.redPoints == 5) {
+        	objective.getScore("§c➜⬛⬛⬛⬛⬛").setScore(6);
+
+        }
+        
+        
+
+        if(BridgeGame.bluePoints == 0) {
+        	objective.getScore("§9➜⬜⬜⬜⬜⬜").setScore(7);
+        }else if(BridgeGame.bluePoints == 1) {
+        	objective.getScore("§9➜⬛⬜⬜⬜⬜").setScore(7);
+
+        }else if(BridgeGame.bluePoints == 2) {
+        	objective.getScore("§9➜⬛⬛⬜⬜⬜").setScore(7);
+
+        }else if(BridgeGame.bluePoints == 3) {
+        	objective.getScore("§9➜⬛⬛⬛⬜⬜").setScore(7);
+
+        }else if(BridgeGame.bluePoints == 4) {
+        	objective.getScore("§9➜⬛⬛⬛⬛⬜").setScore(7);
+
+        }else if(BridgeGame.bluePoints == 5) {
+        	objective.getScore("§9➜⬛⬛⬛⬛⬛").setScore(7);
+
+        }
+        
+      
+
+        
+        objective.getScore("§f ").setScore(5);
+
+        objective.getScore("§f").setScore(4);
+
+        
+        if(player.getName().equals(BridgeGame.redPlayer.getName())) {
+        	objective.getScore("§fKills: §b"+BridgeGame.kills_red).setScore(3);	
+        }
+        if(player.getName().equals(BridgeGame.bluePlayer.getName())) {
+        	objective.getScore("§fKills: §b"+BridgeGame.kills_blue).setScore(3);	
+        }
+        objective.getScore("§fWinstreak: §b0").setScore(2);
+        objective.getScore("§f").setScore(1);
+        objective.getScore("§ewww.garkey.com").setScore(0);
+
+        player.setScoreboard(scoreboard);
+    }
+    
+    private static void updateBridgeBoardPreGame(Player player) {
+
+        Scoreboard scoreboard = player.getScoreboard();
+
+        Objective objective = scoreboard.getObjective("sidebar");
+
+        if (objective == null) {
+            objective = scoreboard.registerNewObjective("sidebar", "dummy");
+            objective.setDisplaySlot(DisplaySlot.SIDEBAR);
+        }
+
+        objective.setDisplayName(
+                BRIDGE_TITLES[bridgeAnimation]
+        );
+
+        for (String entry : scoreboard.getEntries()) {
+            scoreboard.resetScores(entry);
+        }
+
+        objective.getScore("§1").setScore(10);
+
+        objective.getScore("§fMapa: §b Nether" ).setScore(9);
+        
+
+        objective.getScore("§fJogadores: §b1/2").setScore(8);
+        objective.getScore("§f ").setScore(7);
+
+        objective.getScore("§fAguardando...").setScore(6);
+        objective.getScore("§f ").setScore(5);
+
+        objective.getScore("§fModo: §b1v1").setScore(4);
+
+        objective.getScore("§fWinStreak: §b0").setScore(3);
+
+        objective.getScore("§ewww.garkey.com").setScore(0);
+
+        player.setScoreboard(scoreboard);
+    }
+}
